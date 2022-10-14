@@ -1,0 +1,10 @@
+domain: topology-hinter.maxsum.io
+layout:
+- go.kubebuilder.io/v3
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}
+projectName: topology-hinter
+repo: github.com/Max-Sum/topology-hinter
+resources: {}
+version: "3"
