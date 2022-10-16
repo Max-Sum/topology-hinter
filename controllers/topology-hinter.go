@@ -370,11 +370,14 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			for _, z := range zones {
 				// Ensure all zones get at least one endpoint
 				branch := z.geoTree
-				for {
+				for branch != nil {
 					if len(branch.endpoints) > 0 {
 						log.Log.Info("hinting: found in level "+branch.label+" for zone "+z.name, "num", len(branch.endpoints))
 						// Found endpoints at this level, set forzones
 						for _, p := range branch.endpoints {
+							if p.Hints == nil {
+								p.Hints = &discoveryv1.EndpointHints{}
+							}
 							p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{
 								Name: z.name,
 							})
