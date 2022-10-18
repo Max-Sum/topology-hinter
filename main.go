@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"io/ioutil"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -27,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -52,8 +54,10 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
+	var topologyKeysFilePath string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&topologyKeysFilePath, "topology-keys-file-path", "/topology-keys.yaml", "The topology keys config file path.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -65,6 +69,19 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	mgrConfig := controllers.Config{}
+	topokeyfile, err := ioutil.ReadFile(topologyKeysFilePath)
+	if err != nil {
+		setupLog.Error(err, "failed to read topology keys file")
+		os.Exit(1)
+	}
+
+	if err := yaml.Unmarshal(topokeyfile, &mgrConfig); err != nil {
+		setupLog.Error(err, "failed to unmarshal topology keys file")
+		os.Exit(1)
+	}
+	setupLog.Info("topo config", "config", mgrConfig)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -93,13 +110,7 @@ func main() {
 	if err = (&controllers.EndpointSliceReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "TopologyHinter")
-		os.Exit(1)
-	}
-	if err = (&controllers.EndpointSliceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Config: mgrConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TopologyHinter")
 		os.Exit(1)

@@ -67,5 +67,14 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
+        volumeMounts:
+        - mountPath: /topology-keys.yaml
+          name: config
+          readOnly: true
+          subPath: topology-keys.yaml
+      volumes:
+      - configMap:
+          name: topology-hinter-config
+        name: config
       serviceAccountName: manager
       terminationGracePeriodSeconds: 10

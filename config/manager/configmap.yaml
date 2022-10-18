@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: topology-hinter-config
+data:
+  # file-like keys
+  topology-keys.yaml: |
+    topologyKeys:
+    # First topology must not be larger than zone, like hostname
+    - "topology.kubernetes.io/zone"
+    - "topology.kubernetes.io/region"
+    - "geo.maxsum.io/city"
+    - "geo.maxsum.io/country"
+    - "geo.maxsum.io/subcontinent"
+    - "geo.maxsum.io/continent"
+    - "*"
