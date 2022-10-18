@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -44,8 +45,19 @@ type EndpointSliceReconciler struct {
 	Config Config
 }
 
+type MetricDst struct {
+	To     string `yaml:"to"`
+	Metric int    `yaml:"metric"`
+}
+
+type MetricSrc struct {
+	From string      `yaml:"from"`
+	Tos  []MetricDst `yaml:"tos"`
+}
 type Config struct {
-	TopologyKeys []string `yaml:"topologyKeys"`
+	TopologyKeys  []string    `yaml:"topologyKeys"`
+	DefaultMetric int         `yaml:"defaultMetrics"`
+	Metrics       []MetricSrc `yaml:"metrics"`
 }
 
 const (
@@ -77,6 +89,7 @@ func getNamespacedName(o k8sObj) types.NamespacedName {
 
 type geoTree struct {
 	label       string                  // Label of this level
+	content     string                  // Content of label
 	childLabel  string                  // Label of next level
 	endpointsv4 []*discoveryv1.Endpoint // Available Endpoints IPv4
 	endpointsv6 []*discoveryv1.Endpoint // Available Endpoints IPv6
@@ -84,7 +97,7 @@ type geoTree struct {
 	parent      *geoTree
 }
 
-func (r *EndpointSliceReconciler) buildGeoBranch(nodes []*corev1.Node, labelList []string, labelContent string) (*geoTree, map[string]*geoTree, error) {
+func (r *EndpointSliceReconciler) buildGeoBranch(nodes []*corev1.Node, labelList []string) (*geoTree, map[string]*geoTree, error) {
 	zonemap := make(map[string]*geoTree)
 	if len(labelList) == 1 {
 		tree := &geoTree{label: labelList[0]}
@@ -101,16 +114,21 @@ func (r *EndpointSliceReconciler) buildGeoBranch(nodes []*corev1.Node, labelList
 		parent:     nil,
 	}
 	group := make(map[string][]*corev1.Node)
-	for _, node := range nodes {
-		v := node.Labels[tree.childLabel]
-		group[v] = append(group[v], node)
+	if tree.childLabel == "*" {
+		group[""] = nodes
+	} else {
+		for _, node := range nodes {
+			v := node.Labels[tree.childLabel]
+			group[v] = append(group[v], node)
+		}
 	}
 	for v, nodes := range group {
-		child, zm, err := r.buildGeoBranch(nodes, labelList[1:], v)
+		child, zm, err := r.buildGeoBranch(nodes, labelList[1:])
 		if err != nil {
 			return nil, nil, err
 		}
 		child.parent = tree
+		child.content = v
 		tree.children[v] = child
 		// merge zonemap
 		for z, leaf := range zm {
@@ -153,7 +171,7 @@ func (r *EndpointSliceReconciler) buildGeoTree(nodeList *corev1.NodeList) (*geoT
 	for i := range nodeList.Items {
 		nodes[i] = &nodeList.Items[i]
 	}
-	return r.buildGeoBranch(nodes, availableLabelList, "")
+	return r.buildGeoBranch(nodes, availableLabelList)
 }
 
 func (r *EndpointSliceReconciler) deleteSlice(ctx context.Context, name string, namespace string) error {
@@ -175,6 +193,20 @@ func (r *EndpointSliceReconciler) deleteSlice(ctx context.Context, name string, 
 	}
 	log.Log.Info("endpointslice " + getNamespacedName(slice).String() + " deleted")
 	return nil
+}
+
+func (r *EndpointSliceReconciler) getMetric(from, to string) int {
+	for _, src := range r.Config.Metrics {
+		if src.From != from {
+			continue
+		}
+		for _, dst := range src.Tos {
+			if dst.To == to {
+				return dst.Metric
+			}
+		}
+	}
+	return r.Config.DefaultMetric
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -304,6 +336,7 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	var tree *geoTree
 	var zonemap map[string]*geoTree
+	metricLabel := ""
 	if shouldHint {
 		// build geo tree
 		tree, zonemap, err = r.buildGeoTree(nodeList)
@@ -312,6 +345,10 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 		log.Log.Info("geo tree built")
+		// Use the label above *
+		if r.Config.TopologyKeys[len(r.Config.TopologyKeys)-1] == "*" && len(r.Config.TopologyKeys) > 1 {
+			metricLabel = r.Config.TopologyKeys[len(r.Config.TopologyKeys)-2]
+		}
 	}
 
 	// Copy Endpoints -> EndpointSlice
@@ -464,26 +501,70 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			for z, leaf := range zonemap {
 				// traverse tree from leaf
 				branch := leaf
+				var prevBranch *geoTree
 				for branch != nil && branch != tree {
-					if len(branch.endpointsv4) > 0 {
-						log.Log.Info("hinting: found IPv4 endpoints in level "+branch.label+" for zone "+z, "num", len(branch.endpointsv4))
-						// Found endpoints at this level, set forzones
-						for _, p := range branch.endpointsv4 {
-							if p.Hints == nil {
-								p.Hints = &discoveryv1.EndpointHints{}
+					if len(branch.endpointsv4) == 0 {
+						prevBranch = branch
+						branch = branch.parent
+						continue
+					}
+					log.Log.Info("hinting: found IPv4 endpoints in level "+branch.label+" for zone "+z, "num", len(branch.endpointsv4))
+					if branch.childLabel == metricLabel && prevBranch != nil {
+						log.Log.Info("hinting: calculate metrics at level " + branch.childLabel)
+						branches := make(map[int][]*geoTree)
+						keys := []int{}
+						from := prevBranch.content
+						for name, child := range branch.children {
+							metric := r.getMetric(from, name)
+							log.Log.Info("hinting: metric " + from + " -> " + name + ": " + strconv.Itoa(metric))
+							branches[metric] = append(branches[metric], child)
+						}
+						for k := range branches {
+							keys = append(keys, k)
+						}
+						// Sort metrics
+						sort.Ints(keys)
+						for _, k := range keys {
+							found := false
+							for _, b := range branches[k] {
+								if len(b.endpointsv4) == 0 {
+									continue
+								}
+								log.Log.Info("hinting: found IPv4 endpoints in level "+b.label+" for zone "+z, "num", len(b.endpointsv4), "metric", k)
+								for _, p := range b.endpointsv4 {
+									found = true
+									if p.Hints == nil {
+										p.Hints = &discoveryv1.EndpointHints{}
+									}
+									p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{Name: z})
+									if len(p.Hints.ForZones) > 8 {
+										log.Log.Error(errors.New("hinting: forzones is > 8, cannot fulfill. Ignored"), "")
+										shouldHint = false
+										break
+									}
+									log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z)
+								}
 							}
-							p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{Name: z})
-							if len(p.Hints.ForZones) > 8 {
-								log.Log.Error(errors.New("hinting: forzones is > 8, cannot fulfill. Ignored"), "")
-								shouldHint = false
+							if found {
 								break
 							}
-							log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z)
 						}
 						break
 					}
-					// Go up one level
-					branch = branch.parent
+					// Found endpoints at this level, set forzones
+					for _, p := range branch.endpointsv4 {
+						if p.Hints == nil {
+							p.Hints = &discoveryv1.EndpointHints{}
+						}
+						p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{Name: z})
+						if len(p.Hints.ForZones) > 8 {
+							log.Log.Error(errors.New("hinting: forzones is > 8, cannot fulfill. Ignored"), "")
+							shouldHint = false
+							break
+						}
+						log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z)
+					}
+					break
 				}
 				if !shouldHint {
 					for _, point := range slicev4.Endpoints {
@@ -499,26 +580,70 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			for z, leaf := range zonemap {
 				// traverse tree from leaf
 				branch := leaf
+				var prevBranch *geoTree
 				for branch != nil && branch != tree {
-					if len(branch.endpointsv6) > 0 {
-						log.Log.Info("hinting: found IPv4 endpoints in level "+branch.label+" for zone "+z, "num", len(branch.endpointsv6))
-						// Found endpoints at this level, set forzones
-						for _, p := range branch.endpointsv6 {
-							if p.Hints == nil {
-								p.Hints = &discoveryv1.EndpointHints{}
+					if len(branch.endpointsv6) == 0 {
+						prevBranch = branch
+						branch = branch.parent
+						continue
+					}
+					log.Log.Info("hinting: found IPv6 endpoints in level "+branch.label+" for zone "+z, "num", len(branch.endpointsv6))
+					if branch.childLabel == metricLabel && prevBranch != nil {
+						log.Log.Info("hinting: calculate metrics at level " + branch.childLabel)
+						branches := make(map[int][]*geoTree)
+						keys := []int{}
+						from := prevBranch.content
+						for name, child := range branch.children {
+							metric := r.getMetric(from, name)
+							log.Log.Info("hinting: metric " + from + " -> " + name + ": " + strconv.Itoa(metric))
+							branches[metric] = append(branches[metric], child)
+						}
+						for k := range branches {
+							keys = append(keys, k)
+						}
+						// Sort metrics
+						sort.Ints(keys)
+						for _, k := range keys {
+							found := false
+							for _, b := range branches[k] {
+								if len(b.endpointsv6) == 0 {
+									continue
+								}
+								log.Log.Info("hinting: found IPv6 endpoints in level "+b.label+" for zone "+z, "num", len(b.endpointsv6), "metric", k)
+								for _, p := range b.endpointsv6 {
+									found = true
+									if p.Hints == nil {
+										p.Hints = &discoveryv1.EndpointHints{}
+									}
+									p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{Name: z})
+									if len(p.Hints.ForZones) > 8 {
+										log.Log.Error(errors.New("hinting: forzones is > 8, cannot fulfill. Ignored"), "")
+										shouldHint = false
+										break
+									}
+									log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z)
+								}
 							}
-							p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{Name: z})
-							if len(p.Hints.ForZones) > 8 {
-								log.Log.Error(errors.New("hinting: forzones is > 8, cannot fulfill. Ignored"), "")
-								shouldHint = false
+							if found {
 								break
 							}
-							log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z)
 						}
 						break
 					}
-					// Go up one level
-					branch = branch.parent
+					// Found endpoints at this level, set forzones
+					for _, p := range branch.endpointsv6 {
+						if p.Hints == nil {
+							p.Hints = &discoveryv1.EndpointHints{}
+						}
+						p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{Name: z})
+						if len(p.Hints.ForZones) > 8 {
+							log.Log.Error(errors.New("hinting: forzones is > 8, cannot fulfill. Ignored"), "")
+							shouldHint = false
+							break
+						}
+						log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z)
+					}
+					break
 				}
 				if !shouldHint {
 					for _, point := range slicev4.Endpoints {

@@ -12,5 +12,251 @@ data:
     - "geo.maxsum.io/city"
     - "geo.maxsum.io/country"
     - "geo.maxsum.io/subcontinent"
-    - "geo.maxsum.io/continent"
     - "*"
+    # Metrics is routing cost when matching "*"
+    defaultMetrics: 1000
+    metrics:
+    - from: east-asia
+      tos:
+      - to: east-asia
+        metric: 0
+      - to: south-east-asia
+        metric: 80
+      - to: south-asia
+        metric: 130
+      - to: oceania
+        metric: 150
+      - to: central-asia
+        metric: 300
+      - to: west-asia
+        metric: 280
+      - to: europe
+        metric: 250
+      - to: north-africa
+        metric: 300
+      - to: south-africa
+        metric: 380
+      - to: north-america
+        metric: 120
+      - to: south-america
+        metric: 280
+    - from: south-east-asia
+      tos:
+      - to: east-asia
+        metric: 80
+      - to: south-asia
+        metric: 50
+      - to: oceania
+        metric: 100
+      - to: central-asia
+        metric: 280
+      - to: west-asia
+        metric: 160
+      - to: europe
+        metric: 180
+      - to: north-africa
+        metric: 200
+      - to: south-africa
+        metric: 350
+      - to: north-america
+        metric: 180
+      - to: south-america
+        metric: 350
+    - from: south-asia
+      tos:
+      - to: east-asia
+        metric: 130
+      - to: south-east-asia
+        metric: 50
+      - to: oceania
+        metric: 270
+      - to: central-asia
+        metric: 250
+      - to: west-asia
+        metric: 160
+      - to: europe
+        metric: 120
+      - to: north-africa
+        metric: 200
+      - to: south-africa
+        metric: 280
+      - to: north-america
+        metric: 220
+      - to: south-america
+        metric: 320
+    - from: oceania
+      tos:
+      - to: east-asia
+        metric: 150
+      - to: south-east-asia
+        metric: 100
+      - to: south-asia
+        metric: 270
+      - to: central-asia
+        metric: 350
+      - to: west-asia
+        metric: 320
+      - to: europe
+        metric: 250
+      - to: north-africa
+        metric: 300
+      - to: south-africa
+        metric: 280
+      - to: north-america
+        metric: 180
+      - to: south-america
+        metric: 350
+    - from: central-asia
+      tos:
+      - to: east-asia
+        metric: 300
+      - to: south-east-asia
+        metric: 280
+      - to: south-asia
+        metric: 250
+      - to: oceania
+        metric: 350
+      - to: west-asia
+        metric: 200
+      - to: europe
+        metric: 100
+      - to: north-africa
+        metric: 150
+      - to: south-africa
+        metric: 300
+      - to: north-america
+        metric: 250
+      - to: south-america
+        metric: 300
+    - from: west-asia
+      tos:
+      - to: east-asia
+        metric: 280
+      - to: south-east-asia
+        metric: 100
+      - to: south-asia
+        metric: 160
+      - to: oceania
+        metric: 320
+      - to: central-asia
+        metric: 200
+      - to: europe
+        metric: 70
+      - to: north-africa
+        metric: 120
+      - to: south-africa
+        metric: 230
+      - to: north-america
+        metric: 160
+      - to: south-america
+        metric: 180
+    - from: europe
+      tos:
+      - to: east-asia
+        metric: 250
+      - to: south-east-asia
+        metric: 180
+      - to: south-asia
+        metric: 120
+      - to: oceania
+        metric: 250
+      - to: central-asia
+        metric: 100
+      - to: west-asia
+        metric: 70
+      - to: north-africa
+        metric: 50
+      - to: south-africa
+        metric: 180
+      - to: north-america
+        metric: 110
+      - to: south-america
+        metric: 180
+    - from: north-africa
+      tos:
+      - to: east-asia
+        metric: 300
+      - to: south-east-asia
+        metric: 200
+      - to: south-asia
+        metric: 200
+      - to: oceania
+        metric: 300
+      - to: central-asia
+        metric: 150
+      - to: west-asia
+        metric: 120
+      - to: europe
+        metric: 50
+      - to: south-africa
+        metric: 100
+      - to: north-america
+        metric: 160
+      - to: south-america
+        metric: 220
+    - from: south-africa
+      tos:
+      - to: east-asia
+        metric: 380
+      - to: south-east-asia
+        metric: 350
+      - to: south-asia
+        metric: 280
+      - to: oceania
+        metric: 280
+      - to: central-asia
+        metric: 300
+      - to: west-asia
+        metric: 230
+      - to: europe
+        metric: 180
+      - to: north-africa
+        metric: 100
+      - to: north-america
+        metric: 270
+      - to: south-america
+        metric: 350
+    - from: north-america
+      tos:
+      - to: east-asia
+        metric: 120
+      - to: south-east-asia
+        metric: 180
+      - to: south-asia
+        metric: 230
+      - to: oceania
+        metric: 220
+      - to: central-asia
+        metric: 250
+      - to: west-asia
+        metric: 250
+      - to: europe
+        metric: 110
+      - to: north-africa
+        metric: 160
+      - to: south-africa
+        metric: 270
+      - to: south-america
+        metric: 140
+    - from: south-america
+      tos:
+      - to: east-asia
+        metric: 280
+      - to: south-east-asia
+        metric: 350
+      - to: south-asia
+        metric: 320
+      - to: oceania
+        metric: 350
+      - to: central-asia
+        metric: 300
+      - to: west-asia
+        metric: 250
+      - to: europe
+        metric: 180
+      - to: north-africa
+        metric: 220
+      - to: south-africa
+        metric: 350
+      - to: north-america
+        metric: 140

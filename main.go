@@ -81,7 +81,6 @@ func main() {
 		setupLog.Error(err, "failed to unmarshal topology keys file")
 		os.Exit(1)
 	}
-	setupLog.Info("topo config", "config", mgrConfig)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,

@@ -4,20 +4,36 @@ Bring back topology key-based service routing to Kubernetes.
 
 ## Description
 
-[Topology-aware  Routing with topology keys](https://kubernetes.io/docs/concepts/services-networking/service-topology/) is deprecated since Kubernetes 1.22. The successor [Topology Aware Hints](https://kubernetes.io/docs/concepts/services-networking/topology-aware-hints/) poses strict restrictions to ensure load balance. However, for clusters running across multiple zones but running just a few replicas, the auto hinting is impossible by kubernetes' built-in EndpointSlice controller.
+[Topology-aware Routing with topology keys](https://kubernetes.io/docs/concepts/services-networking/service-topology/) is deprecated since Kubernetes 1.22. The successor [Topology Aware Hints](https://kubernetes.io/docs/concepts/services-networking/topology-aware-hints/) poses strict restrictions to ensure load balance. However, for clusters running across multiple zones but running just a few replicas, the auto hinting is impossible by kubernetes' built-in EndpointSlice controller.
 
 Topology Hinter takes over the control of EndpointSlice and set hinting based on topology keys. Therefor, features provided by EndpointSlice will be disabled and number of endpoints is limited to 100.
 
-### Topology keys used
+## Logic
 
-- geo.maxsum.io/continent
-- geo.maxsum.io/subcotinent
-- geo.maxsum.io/country
-- geo.maxsum.io/city
-- topology.kubernetes.io/region
-- topology.kubernetes.io/zone
+The logic is similar to [Topology-aware Routing with topology keys](https://kubernetes.io/docs/concepts/services-networking/service-topology/) used to be. Service endpoints will match by topology keys until matched. Topology keys can be set in ConfigMap in `config/manager/configmap.yaml`. *Reconfigure requires a restart of the hinter*.
 
-Topology keys are hard coded now but will be configurable in the future. Missing topology keys will be ignored except for `topology.kubernetes.io/zone`. Hostname is not supported since hinting is based on zones.
+Metrics are introduced to further control routing. When "\*" is at the end of topology keys, metrics can be applied to one upper level above "\*". Point-to-point metrics are configurable and the zones with lowest metrics will be used. For example:
+
+Suppose there're four zones: `eu-central-1`, `us-west-1`, `us-west-2`, `ap-north-1`, region are set to `eu-central `, `us-west `and `ap-north `respectively. Endpoints are available in `eu-central-1`, `us-west-1`.
+
+Config:
+
+```yaml
+topologyKeys:
+- "topology.kubernetes.io/zone"
+- "topology.kubernetes.io/region"
+- "*"
+defaultMetrics: 1000
+metrics:
+- from: ap-north
+  tos:
+  - to: eu-central
+    metric: 200
+  - to: us-west
+    metric: 100
+```
+
+Then endpoints in `us-west-1` and `us-west-2` will provide service for `us-west-1 `(zone matched), `us-west-2` (region matched) and `ap-north-1 `(matched at *, routed by metrics), `eu-central-1` will serve itself.
 
 ## Getting Started
 
@@ -124,6 +140,10 @@ ports:
   port: 80
   protocol: TCP
 ```
+
+## Metrics on lowest level
+
+This
 
 ## Contributing
 
