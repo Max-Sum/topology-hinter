@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"net"
 	"strconv"
 	"strings"
 
@@ -52,11 +53,14 @@ const (
 	subContinentLabel   = "geo.maxsum.io/subcontinent"
 	continentLabel      = "geo.maxsum.io/continent"
 	servicenameLabel    = "kubernetes.io/service-name"
+	ipFamilyLabel       = "topology-hinter.maxsum.io/ip-family"
 	sliceManagedByLabel = "endpointslice.kubernetes.io/managed-by"
 	sliceManager        = "topology-hinter.maxsum.io"
 	sliceController     = "endpointslice-controller.k8s.io"
 
 	numSliceAnnotation = "topology-hinter.maxsum.io/num-slices"
+	ipv4Annotation     = "topology-hinter.maxsum.io/ipv4"
+	ipv6Annotation     = "topology-hinter.maxsum.io/ipv6"
 )
 
 type k8sObj interface {
@@ -72,10 +76,11 @@ func getNamespacedName(o k8sObj) types.NamespacedName {
 }
 
 type geoTree struct {
-	label     string                  // Label of this level
-	endpoints []*discoveryv1.Endpoint // Available Endpoints
-	children  map[string]*geoTree     // nextLevel, key = label (this level)'s content
-	parent    *geoTree
+	label       string                  // Label of this level
+	endpointsv4 []*discoveryv1.Endpoint // Available Endpoints IPv4
+	endpointsv6 []*discoveryv1.Endpoint // Available Endpoints IPv6
+	children    map[string]*geoTree     // nextLevel, key = label (this level)'s content
+	parent      *geoTree
 }
 
 type zone struct {
@@ -86,19 +91,21 @@ type zone struct {
 func buildGeoBranch(nodes []*corev1.Node, labelList []string, labelContent string) (*geoTree, []*zone) {
 	if len(labelList) == 0 {
 		tree := &geoTree{
-			label:     "",
-			endpoints: make([]*discoveryv1.Endpoint, 0),
-			children:  nil,
-			parent:    nil,
+			label:       "",
+			endpointsv4: make([]*discoveryv1.Endpoint, 0),
+			endpointsv6: make([]*discoveryv1.Endpoint, 0),
+			children:    nil,
+			parent:      nil,
 		}
 		return tree, []*zone{{geoTree: tree, name: labelContent}}
 	}
 	label := labelList[0]
 	tree := &geoTree{
-		label:     label,
-		endpoints: make([]*discoveryv1.Endpoint, 0),
-		children:  make(map[string]*geoTree),
-		parent:    nil,
+		label:       label,
+		endpointsv4: make([]*discoveryv1.Endpoint, 0),
+		endpointsv6: make([]*discoveryv1.Endpoint, 0),
+		children:    make(map[string]*geoTree),
+		parent:      nil,
 	}
 	zones := make([]*zone, 0)
 	group := make(map[string][]*corev1.Node)
@@ -178,7 +185,8 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	_ = log.FromContext(ctx)
 	shouldHint := true
 	endpointUnderControl := false
-	hasAnnotation := false
+	useIPv4 := false
+	useIPv6 := false
 	boolTrue := true
 	boolFalse := false
 	var err error
@@ -241,22 +249,35 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// Check if hint annotation presents
 	{
+		// Check service uses selectors
+		useSelectors := len(service.Spec.Selector) > 0
+		// Check if hint annotation presents
 		hint, ok := service.Annotations[hintAnnotation]
-		hasAnnotation = ok && strings.ToLower(hint) == "true"
-	}
+		hasAnnotation := ok && strings.ToLower(hint) == "true"
+		// Check ip families
+		for _, ipFamily := range service.Spec.IPFamilies {
+			switch ipFamily {
+			case corev1.IPv4Protocol:
+				useIPv4 = true
+			case corev1.IPv6Protocol:
+				useIPv6 = true
+			default:
+				continue
+			}
+		}
 
-	if !hasAnnotation {
-		if endpointUnderControl {
-			// Cannot return control to endpointslice controller
-			// continue to sync with endpoints without hints
-			log.Log.Info("service " + req.NamespacedName.String() + " no longer has annotation, no hinting applied")
-			shouldHint = false
-		} else {
-			// Ignored
-			log.Log.Info("service " + req.NamespacedName.String() + " has no annotation, ignored")
-			return ctrl.Result{}, nil
+		if !hasAnnotation || !useSelectors {
+			if endpointUnderControl {
+				// Cannot return control to endpointslice controller
+				// continue to sync with endpoints without hints
+				log.Log.Info("service " + req.NamespacedName.String() + " no longer has annotation, no hinting applied")
+				shouldHint = false
+			} else {
+				// Ignored
+				log.Log.Info("service " + req.NamespacedName.String() + " has no annotation, ignored")
+				return ctrl.Result{}, nil
+			}
 		}
 	}
 
@@ -290,20 +311,41 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Copy Endpoints -> EndpointSlice
 	for i, subset := range endpoint.Subsets {
-		slice := &discoveryv1.EndpointSlice{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: endpoint.GetNamespace(),
-				Name:      endpoint.GetName() + "-" + strconv.Itoa(i),
-				Labels: map[string]string{
-					sliceManagedByLabel: sliceManager,
-					servicenameLabel:    service.GetName(),
+		var slicev4 *discoveryv1.EndpointSlice
+		var slicev6 *discoveryv1.EndpointSlice
+		if useIPv4 {
+			slicev4 = &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: endpoint.GetNamespace(),
+					Name:      endpoint.GetName() + "-ipv4-" + strconv.Itoa(i),
+					Labels: map[string]string{
+						sliceManagedByLabel: sliceManager,
+						servicenameLabel:    service.GetName(),
+						ipFamilyLabel:       "IPv4",
+					},
 				},
-			},
-			AddressType: discoveryv1.AddressTypeIPv4,
-			Ports:       make([]discoveryv1.EndpointPort, 0, len(subset.Ports)),
-			Endpoints:   make([]discoveryv1.Endpoint, 0, len(subset.Addresses)+len(subset.NotReadyAddresses)),
+				AddressType: discoveryv1.AddressTypeIPv4,
+				Ports:       make([]discoveryv1.EndpointPort, 0, len(subset.Ports)),
+				Endpoints:   make([]discoveryv1.Endpoint, 0, len(subset.Addresses)+len(subset.NotReadyAddresses)),
+			}
 		}
-		log.Log.Info("slice " + getNamespacedName(slice).String() + " temporarily created")
+		if useIPv6 {
+			slicev6 = &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: endpoint.GetNamespace(),
+					Name:      endpoint.GetName() + "-ipv6-" + strconv.Itoa(i),
+					Labels: map[string]string{
+						sliceManagedByLabel: sliceManager,
+						servicenameLabel:    service.GetName(),
+						ipFamilyLabel:       "IPv6",
+					},
+				},
+				AddressType: discoveryv1.AddressTypeIPv6,
+				Ports:       make([]discoveryv1.EndpointPort, 0, len(subset.Ports)),
+				Endpoints:   make([]discoveryv1.Endpoint, 0, len(subset.Addresses)+len(subset.NotReadyAddresses)),
+			}
+		}
+		log.Log.Info("slice " + getNamespacedName(endpoint).String() + "-" + strconv.Itoa(i) + " temporarily created")
 		for _, port := range subset.Ports {
 			esPort := discoveryv1.EndpointPort{
 				Name:        &port.Name,
@@ -311,20 +353,59 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				Protocol:    &port.Protocol,
 				AppProtocol: port.AppProtocol,
 			}
-			slice.Ports = append(slice.Ports, *esPort.DeepCopy())
+			if slicev4 != nil {
+				slicev4.Ports = append(slicev4.Ports, *esPort.DeepCopy())
+			}
+			if slicev6 != nil {
+				slicev6.Ports = append(slicev6.Ports, *esPort.DeepCopy())
+			}
 		}
-		log.Log.Info("slice " + getNamespacedName(slice).String() + " ports filled")
 		for _, addr := range subset.Addresses {
-			point := discoveryv1.Endpoint{
+			// Ignore without target pod
+			if addr.TargetRef == nil || addr.TargetRef.Kind != "Pod" {
+				continue
+			}
+			pointv4 := discoveryv1.Endpoint{
 				Conditions: discoveryv1.EndpointConditions{
 					Ready: &boolTrue,
 				},
 				NodeName:  addr.NodeName,
-				Addresses: []string{addr.IP},
 				TargetRef: addr.TargetRef,
-				Hints:     &discoveryv1.EndpointHints{ForZones: nil},
 			}
-			log.Log.Info("endpoint " + addr.IP + " created")
+			pointv6 := discoveryv1.Endpoint{
+				Conditions: discoveryv1.EndpointConditions{
+					Ready: &boolTrue,
+				},
+				NodeName:  addr.NodeName,
+				TargetRef: addr.TargetRef,
+			}
+			log.Log.Info("endpoint to " + addr.IP + " created")
+			// Get Pod
+			pod := &corev1.Pod{}
+			if err = r.Get(ctx, types.NamespacedName{
+				Namespace: addr.TargetRef.Namespace,
+				Name:      addr.TargetRef.Name}, pod); err != nil {
+				log.Log.Error(err, "unable to get pod "+addr.TargetRef.Namespace+"/"+addr.TargetRef.Name)
+				return ctrl.Result{}, err
+			}
+			if pod.DeletionTimestamp.IsZero() {
+				pointv4.Conditions.Terminating = &boolFalse
+				pointv6.Conditions.Terminating = &boolFalse
+			} else {
+				pointv4.Conditions.Terminating = &boolTrue
+				pointv6.Conditions.Terminating = &boolTrue
+			}
+			for _, podIP := range pod.Status.PodIPs {
+				ip := net.ParseIP(podIP.IP)
+				if ip == nil {
+					continue
+				}
+				if ip.To4() != nil {
+					pointv4.Addresses = append(pointv4.Addresses, podIP.IP)
+				} else if ip.To16() != nil {
+					pointv6.Addresses = append(pointv6.Addresses, podIP.IP)
+				}
+			}
 			// Find Node
 			node := corev1.Node{}
 			zone := ""
@@ -342,15 +423,26 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			// Fill Zone
 			if z, ok := node.Labels[zoneLabel]; ok {
 				zone = z
-				point.Zone = &zone
+				pointv4.Zone = &zone
+				pointv6.Zone = &zone
 			}
-			slice.Endpoints = append(slice.Endpoints, *(point.DeepCopy()))
+			if slicev4 != nil {
+				slicev4.Endpoints = append(slicev4.Endpoints, *(pointv4.DeepCopy()))
+			}
+			if slicev6 != nil {
+				slicev6.Endpoints = append(slicev6.Endpoints, *(pointv6.DeepCopy()))
+			}
 			log.Log.Info("endpoint " + addr.IP + " appended to slice")
 			// Add to geo tree
 			if shouldHint {
 				next := tree
 				for {
-					next.endpoints = append(next.endpoints, &slice.Endpoints[len(slice.Endpoints)-1])
+					if slicev4 != nil {
+						next.endpointsv4 = append(next.endpointsv4, &slicev4.Endpoints[len(slicev4.Endpoints)-1])
+					}
+					if slicev6 != nil {
+						next.endpointsv6 = append(next.endpointsv6, &slicev6.Endpoints[len(slicev6.Endpoints)-1])
+					}
 					if next.label == "" {
 						break
 					}
@@ -364,17 +456,17 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				log.Log.Info("endpoint " + addr.IP + " appended to geo tree")
 			}
 		}
-		log.Log.Info("slice " + getNamespacedName(slice).String() + " addresses filled")
+		log.Log.Info("slice " + getNamespacedName(endpoint).String() + "-" + strconv.Itoa(i) + " addresses filled")
 		// Sort out hints
-		if shouldHint {
+		if shouldHint && useIPv4 {
 			for _, z := range zones {
 				// Ensure all zones get at least one endpoint
 				branch := z.geoTree
 				for branch != nil {
-					if len(branch.endpoints) > 0 {
-						log.Log.Info("hinting: found in level "+branch.label+" for zone "+z.name, "num", len(branch.endpoints))
+					if len(branch.endpointsv4) > 0 {
+						log.Log.Info("hinting: found IPv4 endpoints in level "+branch.label+" for zone "+z.name, "num", len(branch.endpointsv4))
 						// Found endpoints at this level, set forzones
-						for _, p := range branch.endpoints {
+						for _, p := range branch.endpointsv4 {
 							if p.Hints == nil {
 								p.Hints = &discoveryv1.EndpointHints{}
 							}
@@ -394,52 +486,180 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					branch = branch.parent
 				}
 				if !shouldHint {
-					// Clear hints
-					for _, point := range slice.Endpoints {
+					for _, point := range slicev4.Endpoints {
 						point.Hints = nil
 					}
 					break
 				} else {
-					log.Log.Info("slice " + getNamespacedName(slice).String() + " hints added")
+					log.Log.Info("slice " + getNamespacedName(slicev4).String() + " hints added")
+				}
+			}
+		}
+		if shouldHint && useIPv6 {
+			for _, z := range zones {
+				// Ensure all zones get at least one endpoint
+				branch := z.geoTree
+				for branch != nil {
+					if len(branch.endpointsv6) > 0 {
+						log.Log.Info("hinting: found IPv6 endpoints in level "+branch.label+" for zone "+z.name, "num", len(branch.endpointsv6))
+						// Found endpoints at this level, set forzones
+						for _, p := range branch.endpointsv6 {
+							if p.Hints == nil {
+								p.Hints = &discoveryv1.EndpointHints{}
+							}
+							p.Hints.ForZones = append(p.Hints.ForZones, discoveryv1.ForZone{
+								Name: z.name,
+							})
+							if len(p.Hints.ForZones) > 8 {
+								log.Log.Error(errors.New("hinting: forzones is >8, cannot fulfill. Ignored"), "")
+								shouldHint = false
+								break
+							}
+							log.Log.Info("hinting: use endpoint " + *p.NodeName + " for zone " + z.name)
+						}
+						break
+					}
+					// Go up one level
+					branch = branch.parent
+				}
+				if !shouldHint {
+					for _, point := range slicev6.Endpoints {
+						point.Hints = nil
+					}
+					break
+				} else {
+					log.Log.Info("slice " + getNamespacedName(slicev6).String() + " hints added")
 				}
 			}
 		}
 		// Add NotReadyAddresses
 		for _, addr := range subset.NotReadyAddresses {
-			point := discoveryv1.Endpoint{
+			// Ignore without target pod
+			if addr.TargetRef == nil || addr.TargetRef.Kind != "Pod" {
+				continue
+			}
+			pointv4 := discoveryv1.Endpoint{
 				Conditions: discoveryv1.EndpointConditions{
-					Ready: &boolFalse,
+					Ready: &boolTrue,
 				},
 				NodeName:  addr.NodeName,
-				Addresses: []string{addr.IP},
 				TargetRef: addr.TargetRef,
-				Hints:     &discoveryv1.EndpointHints{ForZones: nil},
 			}
-			slice.Endpoints = append(slice.Endpoints, *(point.DeepCopy()))
+			pointv6 := discoveryv1.Endpoint{
+				Conditions: discoveryv1.EndpointConditions{
+					Ready: &boolTrue,
+				},
+				NodeName:  addr.NodeName,
+				TargetRef: addr.TargetRef,
+			}
+			log.Log.Info("endpoint to " + addr.IP + " created")
+			// Get Pod
+			pod := &corev1.Pod{}
+			if err = r.Get(ctx, types.NamespacedName{
+				Namespace: addr.TargetRef.Namespace,
+				Name:      addr.TargetRef.Name}, pod); err != nil {
+				log.Log.Error(err, "unable to get pod "+addr.TargetRef.Namespace+"/"+addr.TargetRef.Name)
+				return ctrl.Result{}, err
+			}
+			if pod.DeletionTimestamp.IsZero() {
+				pointv4.Conditions.Terminating = &boolFalse
+				pointv6.Conditions.Terminating = &boolFalse
+			} else {
+				pointv4.Conditions.Terminating = &boolTrue
+				pointv6.Conditions.Terminating = &boolTrue
+			}
+			for _, podIP := range pod.Status.PodIPs {
+				ip := net.ParseIP(podIP.IP)
+				if ip == nil {
+					continue
+				}
+				if ip.To4() != nil {
+					pointv4.Addresses = append(pointv4.Addresses, podIP.IP)
+				} else if ip.To16() != nil {
+					pointv6.Addresses = append(pointv6.Addresses, podIP.IP)
+				}
+			}
+			if slicev4 != nil {
+				slicev4.Endpoints = append(slicev4.Endpoints, *(pointv4.DeepCopy()))
+			}
+			if slicev6 != nil {
+				slicev6.Endpoints = append(slicev6.Endpoints, *(pointv6.DeepCopy()))
+			}
 		}
-		log.Log.Info("slice " + getNamespacedName(slice).String() + " not ready addresses filled")
+		log.Log.Info("slice " + getNamespacedName(endpoint).String() + "-" + strconv.Itoa(i) + " not ready addresses filled")
 
-		ctrl.SetControllerReference(&endpoint.ObjectMeta, &slice.ObjectMeta, r.Scheme)
-		if i < oldNumSlice {
-			err = r.Update(ctx, slice)
-		} else {
-			err = r.Create(ctx, slice)
-			if apierrors.IsAlreadyExists(err) {
-				r.Delete(ctx, slice)
-				err = r.Create(ctx, slice)
+		if slicev4 != nil {
+			if _, hasIPv4 := endpoint.Annotations[ipv4Annotation]; hasIPv4 && i < oldNumSlice {
+				err = r.Update(ctx, slicev4)
+			} else {
+				err = r.Create(ctx, slicev4)
+				if apierrors.IsAlreadyExists(err) {
+					r.Delete(ctx, slicev4)
+					err = r.Create(ctx, slicev4)
+				}
+			}
+			if err != nil {
+				log.Log.Error(err, "failed to update/create endpointSlice")
+				return ctrl.Result{}, err
 			}
 		}
-		if err != nil {
-			log.Log.Error(err, "failed to update/create endpointSlice")
-			return ctrl.Result{}, err
+		if slicev6 != nil {
+			if _, hasIPv6 := endpoint.Annotations[ipv6Annotation]; hasIPv6 && i < oldNumSlice {
+				err = r.Update(ctx, slicev6)
+			} else {
+				err = r.Create(ctx, slicev6)
+				if apierrors.IsAlreadyExists(err) {
+					r.Delete(ctx, slicev6)
+					err = r.Create(ctx, slicev6)
+				}
+			}
+			if err != nil {
+				log.Log.Error(err, "failed to update/create endpointSlice")
+				return ctrl.Result{}, err
+			}
 		}
-		log.Log.Info("endpointslice " + getNamespacedName(slice).String() + " created/updated")
+		log.Log.Info("endpointslice " + getNamespacedName(endpoint).String() + "-" + strconv.Itoa(i) + " created/updated")
 	}
 
 	// Delete slices more than desired state
 	for i := len(endpoint.Subsets); i < oldNumSlice; i++ {
-		err = r.deleteSlice(ctx, endpoint.Name+"-"+strconv.Itoa(i), endpoint.Namespace)
-		if err != nil {
+		if useIPv4 {
+			err = r.deleteSlice(ctx, endpoint.Name+"-ipv4-"+strconv.Itoa(i), endpoint.Namespace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if useIPv6 {
+			err = r.deleteSlice(ctx, endpoint.Name+"-ipv6-"+strconv.Itoa(i), endpoint.Namespace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	if _, hasIPv4 := endpoint.Annotations[ipv4Annotation]; !useIPv4 && hasIPv4 {
+		if err = r.DeleteAllOf(ctx, &discoveryv1.EndpointSlice{}, client.MatchingLabels{
+			sliceManagedByLabel: sliceManager,
+			servicenameLabel:    endpoint.Name,
+			ipFamilyLabel:       "IPv4",
+		}, client.InNamespace(endpoint.Namespace)); err != nil {
+			log.Log.Error(err, "failed to delete endpointSlice")
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, err
+		}
+	}
+	if _, hasIPv6 := endpoint.Annotations[ipv6Annotation]; !useIPv6 && hasIPv6 {
+		if err = r.DeleteAllOf(ctx, &discoveryv1.EndpointSlice{}, client.MatchingLabels{
+			sliceManagedByLabel: sliceManager,
+			servicenameLabel:    endpoint.Name,
+			ipFamilyLabel:       "IPv6",
+		}, client.InNamespace(endpoint.Namespace)); err != nil {
+			log.Log.Error(err, "failed to delete endpointSlice")
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
@@ -457,6 +677,22 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			endpoint.Annotations[numSliceAnnotation] = strconv.Itoa(len(endpoint.Subsets))
 			updateEndpoints = true
+		}
+		if _, hasIPv4 := endpoint.Annotations[ipv4Annotation]; useIPv4 != hasIPv4 {
+			updateEndpoints = true
+			if useIPv4 {
+				endpoint.Annotations[ipv4Annotation] = ""
+			} else {
+				delete(endpoint.Annotations, ipv4Annotation)
+			}
+		}
+		if _, hasIPv6 := endpoint.Annotations[ipv6Annotation]; useIPv6 != hasIPv6 {
+			updateEndpoints = true
+			if useIPv6 {
+				endpoint.Annotations[ipv6Annotation] = ""
+			} else {
+				delete(endpoint.Annotations, ipv6Annotation)
+			}
 		}
 		if updateEndpoints {
 			err = r.Update(ctx, endpoint)
@@ -506,6 +742,46 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 func (r *EndpointSliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Endpoints{}).
+		WithEventFilter(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				ignoredAnnos := []string{numSliceAnnotation, ipv4Annotation, ipv6Annotation}
+				// Filter the changes the hinter makes
+				oldFinalizers := e.ObjectOld.GetFinalizers()
+				newFinalizers := e.ObjectNew.GetFinalizers()
+				finalizerDiff := map[string]int{}
+				for _, k := range oldFinalizers {
+					finalizerDiff[k]++
+				}
+				for _, k := range newFinalizers {
+					finalizerDiff[k]--
+				}
+				for k, v := range finalizerDiff {
+					if v != 0 && k == myFinalizerName {
+						return false
+					}
+				}
+				oldAnnos := e.ObjectOld.GetAnnotations()
+				newAnnos := e.ObjectNew.GetAnnotations()
+				annoDiff := map[string]int{}
+				for k := range oldAnnos {
+					annoDiff[k]++
+				}
+				for k := range newAnnos {
+					annoDiff[k]--
+				}
+				for k, v := range annoDiff {
+					if v == 0 && oldAnnos[k] == newAnnos[k] {
+						continue
+					}
+					for _, ik := range ignoredAnnos {
+						if k == ik {
+							return false
+						}
+					}
+				}
+				return true
+			},
+		}).
 		Complete(r)
 	if err != nil {
 		return err
@@ -515,11 +791,6 @@ func (r *EndpointSliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithEventFilter(predicate.Funcs{
 			CreateFunc: func(_ event.CreateEvent) bool {
 				return false
-			},
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				oldHint, oldOk := e.ObjectOld.GetAnnotations()[hintAnnotation]
-				newHint, newOk := e.ObjectNew.GetAnnotations()[hintAnnotation]
-				return oldOk != newOk || newOk && (oldHint != newHint)
 			},
 			DeleteFunc: func(_ event.DeleteEvent) bool {
 				return false

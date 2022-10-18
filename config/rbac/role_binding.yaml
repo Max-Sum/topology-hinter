@@ -1,11 +1,11 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: node-viewer-rolebinding
+  name: topology-hinter-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: node-viewer-role
+  name: topology-hinter-role
 subjects:
 - kind: ServiceAccount
   name: manager

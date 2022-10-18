@@ -1,0 +1,69 @@
+# permissions for end users to edit endpointslices.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: topology-hinter-role
+rules:
+# View Endpoints
+- apiGroups: [""]
+  resources:
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+- apiGroups: [""]
+  resources:
+  - endpoints/status
+  verbs:
+  - get
+- apiGroups: [""]
+  resources:
+  - endpoints/finalizers
+  verbs:
+  - update
+# Modify EndpointSlices
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups: 
+  - discovery.k8s.io
+  resources:
+  - endpointslices/status
+  verbs:
+  - get
+# View Services
+- apiGroups: [""]
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+# View Nodes
+- apiGroups: [""]
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+# View Pods
+- apiGroups: [""]
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
