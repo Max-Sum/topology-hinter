@@ -45,13 +45,13 @@ You’ll need a Kubernetes cluster to run against. You can use [KIND](https://si
 1. (Optional) Build and push your image to the location specified by `IMG`:
 
 ```sh
-make docker-build docker-push IMG=gzmaxsum/topology-hinter:0.1.0
+make docker-build docker-push IMG=gzmaxsum/topology-hinter:0.1.5
 ```
 
 2. Deploy the controller to the cluster with the image specified by `IMG`:
 
 ```sh
-make deploy IMG=gzmaxsum/topology-hinter:0.1.0
+make deploy IMG=gzmaxsum/topology-hinter:0.1.5
 ```
 
 ### Undeploy controller
