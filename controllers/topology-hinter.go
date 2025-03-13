@@ -663,14 +663,14 @@ func (r *EndpointSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			pointv4 := discoveryv1.Endpoint{
 				Conditions: discoveryv1.EndpointConditions{
-					Ready: &boolTrue,
+					Ready: &boolFalse,
 				},
 				NodeName:  addr.NodeName,
 				TargetRef: addr.TargetRef,
 			}
 			pointv6 := discoveryv1.Endpoint{
 				Conditions: discoveryv1.EndpointConditions{
-					Ready: &boolTrue,
+					Ready: &boolFalse,
 				},
 				NodeName:  addr.NodeName,
 				TargetRef: addr.TargetRef,
